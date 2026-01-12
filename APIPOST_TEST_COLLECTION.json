@@ -1,0 +1,104 @@
+{
+  "name": "AIOps API测试集合",
+  "description": "用于Apipost/Postman导入的测试集合",
+  "requests": [
+    {
+      "name": "1. 完整报修消息（有位置和描述）",
+      "method": "POST",
+      "url": "http://localhost:8080/api/wechat/webhook",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "mode": "raw",
+        "raw": "{\n  \"senderUserId\": \"user001\",\n  \"groupId\": \"group001\",\n  \"content\": \"我家3-201的灯坏了，需要维修\",\n  \"timestamp\": 1705046400000\n}"
+      },
+      "description": "测试完整报修消息，应该返回status=SAVED，actionable=true"
+    },
+    {
+      "name": "2. 信息不全（只有描述）",
+      "method": "POST",
+      "url": "http://localhost:8080/api/wechat/webhook",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "mode": "raw",
+        "raw": "{\n  \"senderUserId\": \"user002\",\n  \"groupId\": \"group001\",\n  \"content\": \"灯坏了\",\n  \"timestamp\": 1705046400000\n}"
+      },
+      "description": "测试信息不全，应该返回status=NEED_MORE_INFO，actionable=false"
+    },
+    {
+      "name": "3. 投诉类型消息",
+      "method": "POST",
+      "url": "http://localhost:8080/api/wechat/webhook",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "mode": "raw",
+        "raw": "{\n  \"senderUserId\": \"user003\",\n  \"groupId\": \"group001\",\n  \"content\": \"3-201的楼上太吵了，影响休息\",\n  \"timestamp\": 1705046400000\n}"
+      },
+      "description": "测试投诉类型，intent应该是COMPLAINT"
+    },
+    {
+      "name": "4. 咨询类型消息",
+      "method": "POST",
+      "url": "http://localhost:8080/api/wechat/webhook",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "mode": "raw",
+        "raw": "{\n  \"senderUserId\": \"user004\",\n  \"groupId\": \"group001\",\n  \"content\": \"物业费什么时候交？\",\n  \"timestamp\": 1705046400000\n}"
+      },
+      "description": "测试咨询类型，intent应该是INQUIRY"
+    },
+    {
+      "name": "5. 闲聊消息",
+      "method": "POST",
+      "url": "http://localhost:8080/api/wechat/webhook",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "mode": "raw",
+        "raw": "{\n  \"senderUserId\": \"user005\",\n  \"groupId\": \"group001\",\n  \"content\": \"收到，谢谢\",\n  \"timestamp\": 1705046400000\n}"
+      },
+      "description": "测试闲聊消息，intent应该是NOISE，actionable=false"
+    },
+    {
+      "name": "6. 带图片的消息",
+      "method": "POST",
+      "url": "http://localhost:8080/api/wechat/webhook",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "mode": "raw",
+        "raw": "{\n  \"senderUserId\": \"user006\",\n  \"groupId\": \"group001\",\n  \"content\": \"3-201的卫生间漏水了\",\n  \"imageUrl\": \"https://example.com/image.jpg\",\n  \"timestamp\": 1705046400000\n}"
+      },
+      "description": "测试带图片的消息，AI应该分析图片内容"
+    },
+    {
+      "name": "7. 参数校验-缺少senderUserId",
+      "method": "POST",
+      "url": "http://localhost:8080/api/wechat/webhook",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "mode": "raw",
+        "raw": "{\n  \"groupId\": \"group001\",\n  \"content\": \"测试消息\"\n}"
+      },
+      "description": "测试参数校验，应该返回400错误"
+    },
+    {
+      "name": "8. 查询草稿",
+      "method": "GET",
+      "url": "http://localhost:8080/api/wechat/drafts?groupId=group001",
+      "headers": {},
+      "description": "查询指定群组的工单草稿列表"
+    }
+  ]
+}
