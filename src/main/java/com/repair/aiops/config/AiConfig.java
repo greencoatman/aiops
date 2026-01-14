@@ -47,4 +47,12 @@ public class AiConfig {
         template.afterPropertiesSet();
         return template;
     }
+
+    @Bean
+    public org.springframework.boot.CommandLineRunner debugEnv(org.springframework.core.env.Environment env) {
+        return args -> {
+            System.out.println("DEBUG: spring.ai.tongyi.api-key=" + env.getProperty("spring.ai.tongyi.api-key"));
+            System.out.println("DEBUG: spring.cloud.ai.tongyi.api-key=" + env.getProperty("spring.cloud.ai.tongyi.api-key"));
+        };
+    }
 }
