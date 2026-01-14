@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  smart-fix-agent:
+    build: .
+    image: smart-fix-agent:latest
+    container_name: smart-fix-agent
+    ports:
+      - "8080:8080"
+    environment:
+      # 这里可以覆盖配置文件中的设置
+      - SERVER_PORT=8080
+      # 如果需要动态传入 API Key，取消下面的注释并设置环境变量
+      # - SPRING_AI_TONGYI_API_KEY=${AI_API_KEY}
+      # - SPRING_CLOUD_AI_TONGYI_API_KEY=${AI_API_KEY}
+    restart: always
