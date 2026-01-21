@@ -1,5 +1,6 @@
 package com.repair.aiops.service.client.impl;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.repair.aiops.model.dto.OrderRequest;
 import com.repair.aiops.model.dto.OrderResponse;
 import com.repair.aiops.service.client.IOrderService;
@@ -19,6 +20,7 @@ import org.springframework.web.client.RestTemplate;
 public class OrderServiceImpl implements IOrderService {
 
     private final RestTemplate restTemplate;
+    private final ObjectMapper objectMapper;
     
     /**
      * 外部系统下单API的URL
@@ -38,14 +40,16 @@ public class OrderServiceImpl implements IOrderService {
     @Value("${aiops.order.enabled:false}")
     private boolean orderEnabled;
 
-    public OrderServiceImpl(RestTemplate restTemplate) {
+    public OrderServiceImpl(RestTemplate restTemplate, ObjectMapper objectMapper) {
         this.restTemplate = restTemplate;
+        this.objectMapper = objectMapper;
     }
 
     @Override
     public OrderResponse createOrder(OrderRequest request) {
         if (!orderEnabled) {
-            log.info("自动下单功能未启用，跳过下单调用");
+            log.info("自动下单功能未启用，跳过下单调用：senderId={}",
+                    request != null ? request.getSenderId() : "unknown");
             return OrderResponse.builder()
                     .success(false)
                     .message("自动下单功能未启用")
@@ -61,7 +65,11 @@ public class OrderServiceImpl implements IOrderService {
         }
         
         try {
-            log.info("调用外部下单接口：url={}, request={}", orderApiUrl, request);
+            log.info("调用外部下单接口：url={}, senderId={}, houseId={}, fileCount={}",
+                    orderApiUrl,
+                    request.getSenderId(),
+                    request.getHouseId(),
+                    request.getFileList() != null ? request.getFileList().size() : 0);
             
             // 设置请求头
             HttpHeaders headers = new HttpHeaders();
@@ -71,26 +79,49 @@ public class OrderServiceImpl implements IOrderService {
             }
             
             // 创建请求实体
-            HttpEntity<OrderRequest> requestEntity = new HttpEntity<>(request, headers);
+            // 构造外部API需要的特定JSON结构
+            java.util.Map<String, Object> payload = new java.util.HashMap<>();
+            payload.put("type", 1); // 1-报修
+            payload.put("category", 5); // 5-默认分类(或根据request.category映射)
+            payload.put("description", request.getDescription());
+            payload.put("appointmentStartTime", request.getAppointmentStartTime());
+            payload.put("appointmentEndTime", request.getAppointmentEndTime());
+            payload.put("fileList", request.getFileList() != null ? request.getFileList() : new java.util.ArrayList<>());
+            payload.put("houseId", request.getHouseId() != null ? request.getHouseId() : 918);
+
+            HttpEntity<java.util.Map<String, Object>> requestEntity = new HttpEntity<>(payload, headers);
             
             // 发送POST请求
-            ResponseEntity<OrderResponse> response = restTemplate.exchange(
+            // 外部API返回text/plain，需要先获取String，再手动转换
+            ResponseEntity<String> response = restTemplate.exchange(
                     orderApiUrl,
                     HttpMethod.POST,
                     requestEntity,
-                    OrderResponse.class
+                    String.class
             );
             
-            OrderResponse orderResponse = response.getBody();
+            String responseBody = response.getBody();
+            OrderResponse orderResponse = null;
+            if (responseBody != null && !responseBody.isEmpty()) {
+                try {
+                    orderResponse = objectMapper.readValue(responseBody, OrderResponse.class);
+                } catch (Exception e) {
+                    log.warn("解析下单响应JSON失败: {}", responseBody, e);
+                    // 尝试作为普通字符串处理或忽略
+                }
+            }
+
             if (orderResponse != null && Boolean.TRUE.equals(orderResponse.getSuccess())) {
-                log.info("下单成功：orderId={}, senderId={}", orderResponse.getOrderId(), request.getSenderId());
+                log.info("下单成功：statusCode={}, orderId={}, senderId={}",
+                        response.getStatusCode().value(), orderResponse.getOrderId(), request.getSenderId());
             } else {
-                log.warn("下单失败：response={}, senderId={}", orderResponse, request.getSenderId());
+                log.warn("下单失败：statusCode={}, response={}, senderId={}",
+                        response.getStatusCode().value(), responseBody, request.getSenderId());
             }
             
             return orderResponse != null ? orderResponse : OrderResponse.builder()
                     .success(false)
-                    .errorMessage("外部系统返回空响应")
+                    .errorMessage("外部系统响应解析失败或为空")
                     .build();
                     
         } catch (RestClientException e) {

@@ -75,7 +75,7 @@ public class AgentService {
                     && !messageContext.getMessages().isEmpty()) {
                 // 使用消息上下文的合并内容
                 history = messageContext.getMergedContent();
-                log.debug("使用消息上下文：senderId={}, 消息数={}, 合并内容={}", 
+                log.debug("使用消息上下文：senderId={}, 消息数={}, 合并内容长度={}", 
                         msg.getSenderUserId(), messageContext.getMessages().size(), history);
             } else {
                 // 降级到简单记忆方式（兼容旧版本）
@@ -139,6 +139,11 @@ public class AgentService {
             // 5. 调用 AI 决策大脑
             TicketDraft draft;
             try {
+                log.info("开始AI分析：senderId={}, contentLength={}, hasHistory={}, hasImage={}",
+                        msg.getSenderUserId(),
+                        msg.getContent() != null ? msg.getContent().length() : 0,
+                        history != null && !history.isEmpty(),
+                        msg.getImageUrl() != null && !msg.getImageUrl().isEmpty());
                 draft = chatClient.prompt()
                         .system(systemPrompt)
                         .messages(userMessage)
@@ -147,6 +152,10 @@ public class AgentService {
             } catch (Exception e) {
                 log.error("AI分析调用失败：senderId={}, error={}", msg.getSenderUserId(), e.getMessage(), e);
                 throw new RuntimeException("AI分析失败: " + e.getMessage(), e);
+            }
+            if (draft != null) {
+                log.info("AI分析完成：senderId={}, actionable={}, intent={}, confidence={}",
+                        msg.getSenderUserId(), draft.isActionable(), draft.getIntent(), draft.getConfidence());
             }
 
             // 6. 闭环记忆处理逻辑

@@ -20,6 +20,10 @@ public class AiConfig {
      */
     @Bean
     public ChatClient chatClient(ChatModel chatModel) {
+        // 强制设置系统属性，确保底层 SDK 能读到
+        System.setProperty("spring.ai.tongyi.api-key", "sk-a30b883429774cd9a76c7554b39f4c2a");
+        System.setProperty("spring.cloud.ai.tongyi.api-key", "sk-a30b883429774cd9a76c7554b39f4c2a");
+        
         // 使用 builder 模式将底层的 DashScopeChatModel 包装成高层的 ChatClient
         return ChatClient.builder(chatModel)
                 .build();

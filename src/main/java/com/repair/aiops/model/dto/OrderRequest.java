@@ -70,4 +70,24 @@ public class OrderRequest {
      * 群ID
      */
     private String groupId;
+
+    /**
+     * 图片列表
+     */
+    private java.util.List<String> fileList;
+
+    /**
+     * 预约开始时间
+     */
+    private String appointmentStartTime;
+
+    /**
+     * 预约结束时间
+     */
+    private String appointmentEndTime;
+
+    /**
+     * 房屋ID
+     */
+    private Long houseId;
 }
