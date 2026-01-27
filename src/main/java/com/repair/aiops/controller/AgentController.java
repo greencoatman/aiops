@@ -17,9 +17,11 @@ import com.repair.aiops.service.storage.OssStorageService;
 import com.repair.aiops.service.wecom.WecomChatArchiveService;
 import com.repair.aiops.service.wecom.WecomChatMessageParser;
 import com.repair.aiops.service.wecom.WecomRobotService;
+import com.repair.aiops.utils.WXBizMsgCrypt;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -38,10 +40,10 @@ public class AgentController {
 
     private final AgentService agentService;
     private final IOrderService orderService;
-    
+
     @Autowired
     private com.repair.aiops.service.business.IOwnerService ownerService;
-    
+
     @Autowired
     private ITicketDraftService draftService; // MyBatis-Plus Service
 
@@ -50,12 +52,24 @@ public class AgentController {
 
     @Autowired
     private WecomChatMessageParser wecomChatMessageParser;
-    
+
     @Autowired
     private OssStorageService ossStorageService;
 
     @Autowired
     private WecomRobotService wecomRobotService;
+
+    @Value("${wecom.callback.token:}")
+    private String callbackToken;
+
+    @Value("${wecom.callback.aes-key:}")
+    private String callbackAesKey;
+
+    @Value("${wecom.corp-id:}")
+    private String corpId;
+
+    @Value("${wecom.chat.archive.allowed-groups:}")
+    private String allowedGroups;
 
     public AgentController(AgentService agentService, IOrderService orderService) {
         this.agentService = agentService;
@@ -79,10 +93,43 @@ public class AgentController {
     }
 
     /**
+     * 企业微信回调 URL 验证
+     */
+    @GetMapping("/webhook")
+    public ResponseEntity<String> verifyUrl(
+            @RequestParam(name = "msg_signature") String msgSignature,
+            @RequestParam(name = "timestamp") String timestamp,
+            @RequestParam(name = "nonce") String nonce,
+            @RequestParam(name = "echostr") String echostr) {
+        
+        log.info("收到企业微信验证请求: msg_signature={}, timestamp={}, nonce={}, echostr={}", 
+                msgSignature, timestamp, nonce, echostr);
+        
+        try {
+            if (callbackToken == null || callbackToken.isEmpty() || 
+                callbackAesKey == null || callbackAesKey.isEmpty() || 
+                corpId == null || corpId.isEmpty()) {
+                log.error("验证失败：Token, AESKey 或 CorpID 未配置");
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("配置缺失");
+            }
+            
+            WXBizMsgCrypt wxcpt = new WXBizMsgCrypt(callbackToken, callbackAesKey, corpId);
+            String result = wxcpt.verifyUrl(msgSignature, timestamp, nonce, echostr);
+            
+            log.info("验证成功，解密内容: {}", result);
+            return ResponseEntity.ok(result);
+            
+        } catch (Exception e) {
+            log.error("验证失败: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body("验证失败");
+        }
+    }
+
+    /**
      * 企业微信会话存档拉取入口（根据 seq 拉取会话记录并进行 AI 分析）
      * 注意：需要配置企业微信的会话存档密钥与解密流程，否则只能拿到加密内容
      */
-    @PostMapping("/webhhok")
+    @PostMapping("/archive/fetch")
     public ResponseEntity<?> onWecomChatArchive(@RequestBody(required = false) WecomChatFetchRequest request) {
         String traceId = UUID.randomUUID().toString().replace("-", "");
         MDC.put("traceId", traceId);
@@ -90,9 +137,12 @@ public class AgentController {
         Long seq = request != null ? request.getSeq() : 0L;
         Integer limit = request != null ? request.getLimit() : 50;
 
-        log.info("[traceId={}] 企业微信会话存档拉取: seq={}, limit={}", traceId, seq, limit);
+        log.info("[traceId={}] [开始] 企业微信会话存档拉取: seq={}, limit={}", traceId, seq, limit);
+        long startTime = System.currentTimeMillis();
+
         WecomChatDataResponse response = wecomChatArchiveService.fetchChatData(seq, limit);
         if (response == null) {
+            log.error("[traceId={}] [失败] 会话存档拉取失败: 可能因配置未启用或网络异常", traceId);
             MDC.remove("traceId");
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(Map.of(
                     "status", "ERROR",
@@ -103,6 +153,8 @@ public class AgentController {
 
         List<WecomChatDataItem> chatData = response.getChatdata();
         int total = chatData != null ? chatData.size() : 0;
+        log.info("[traceId={}] [拉取成功] 获取到 {} 条消息", traceId, total);
+
         int analyzed = 0;
         int skipped = 0;
         List<Map<String, Object>> results = new ArrayList<>();
@@ -111,18 +163,40 @@ public class AgentController {
             for (WecomChatDataItem item : chatData) {
                 String decrypted = item.getDecryptChatMsg();
                 if (decrypted == null || decrypted.trim().isEmpty()) {
+                    log.warn("[traceId={}] [跳过] 消息解密为空或无内容: seq={}", traceId, item.getSeq());
                     skipped++;
                     continue;
                 }
                 GroupMsgDTO msg = wecomChatMessageParser.parse(decrypted);
                 if (msg == null) {
+                    log.warn("[traceId={}] [跳过] 消息解析失败: seq={}, content={}", traceId, item.getSeq(), decrypted);
                     skipped++;
                     continue;
                 }
+
+                // 过滤群ID (白名单机制)
+                if (allowedGroups != null && !allowedGroups.trim().isEmpty()) {
+                    String[] groups = allowedGroups.split(",");
+                    boolean allowed = false;
+                    for (String g : groups) {
+                        if (g.trim().equals(msg.getGroupId())) {
+                            allowed = true;
+                            break;
+                        }
+                    }
+                    if (!allowed) {
+                        // 仅调试级别打印，避免日志刷屏
+                        log.debug("[traceId={}] [过滤] 群不在白名单内，跳过: groupId={}", traceId, msg.getGroupId());
+                        skipped++;
+                        continue;
+                    }
+                }
+
                 // 图片处理：如果是 sdkfileid，则拉取并上传 OSS
                 if (msg.getImageUrl() != null && !msg.getImageUrl().isEmpty()) {
                     String sdkFileId = extractSdkFileId(msg.getImageUrl());
                     if (sdkFileId != null) {
+                        log.info("[traceId={}] [图片处理] 开始下载图片: sdkFileId={}", traceId, sdkFileId);
                         ResponseEntity<byte[]> media = wecomChatArchiveService.fetchMedia(sdkFileId);
                         if (media.getStatusCode().is2xxSuccessful() && media.getBody() != null) {
                             String contentType = media.getHeaders().getContentType() != null
@@ -130,12 +204,20 @@ public class AgentController {
                                     : "image/jpeg";
                             String ossUrl = ossStorageService.upload(media.getBody(), contentType);
                             if (ossUrl != null) {
+                                log.info("[traceId={}] [图片处理] 上传OSS成功: url={}", traceId, ossUrl);
                                 msg.setImageUrl(ossUrl);
+                            } else {
+                                log.error("[traceId={}] [图片处理] 上传OSS失败", traceId);
                             }
+                        } else {
+                            log.error("[traceId={}] [图片处理] 下载图片失败: status={}", traceId, media.getStatusCode());
                         }
                     }
                 }
+
+                log.info("[traceId={}] [开始分析] 处理单条消息: seq={}, senderId={}", traceId, item.getSeq(), msg.getSenderUserId());
                 ResponseEntity<?> analyzeResult = onGroupMessage(msg);
+
                 Map<String, Object> result = new HashMap<>();
                 result.put("seq", item.getSeq());
                 result.put("senderUserId", msg.getSenderUserId());
@@ -147,6 +229,10 @@ public class AgentController {
             }
         }
 
+        long duration = System.currentTimeMillis() - startTime;
+        log.info("[traceId={}] [结束] 本次任务完成: total={}, analyzed={}, skipped={}, nextSeq={}, duration={}ms",
+                traceId, total, analyzed, skipped, response.getNext_seq(), duration);
+
         MDC.remove("traceId");
         return ResponseEntity.ok(Map.of(
                 "status", "OK",
@@ -155,6 +241,7 @@ public class AgentController {
                 "total", total,
                 "analyzed", analyzed,
                 "skipped", skipped,
+                "durationMs", duration,
                 "results", results
         ));
     }
@@ -185,14 +272,14 @@ public class AgentController {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(Map.of("status", "ERROR", "message", "消息不能为空"));
         }
-        
+
         if (msg.getSenderUserId() == null || msg.getSenderUserId().trim().isEmpty()) {
             log.warn("[traceId={}] 收到无效消息：senderUserId为空", traceId);
             MDC.remove("traceId");
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(Map.of("status", "ERROR", "message", "发送者ID不能为空"));
         }
-        
+
         if (msg.getGroupId() == null || msg.getGroupId().trim().isEmpty()) {
             log.warn("[traceId={}] 收到无效消息：groupId为空, senderId={}", traceId, msg.getSenderUserId());
             MDC.remove("traceId");
@@ -231,6 +318,7 @@ public class AgentController {
             // 2. 逻辑分流处理
             if (draftResult.isActionable()) {
                 // 情况 A：AI 认为报修要素齐全 (位置+描述都有了)
+                log.info("[traceId={}] [决策] 信息完整，准备下单: intent={}", traceId, draftResult.getIntent());
                 try {
                     // 先保存草稿
                     TicketDraftEntity entity = new TicketDraftEntity();
@@ -241,31 +329,34 @@ public class AgentController {
                     entity.setStatus(0); // 0-待处理
                     entity.setCreateTime(LocalDateTime.now());
                     draftService.save(entity);
-                    log.info("[traceId={}] 【入库成功】AI 已识别有效报修，已存入草稿池, senderId={}",
-                            traceId, msg.getSenderUserId());
+                    log.info("[traceId={}] [入库] 草稿保存成功: id={}", traceId, entity.getId());
 
                     // 调用外部下单接口
-                    log.info("[traceId={}] 准备调用外部下单接口: senderId={}", traceId, msg.getSenderUserId());
+                    log.info("[traceId={}] [调用] 开始调用外部下单接口...", traceId);
+                    long callStart = System.currentTimeMillis();
                     OrderResponse orderResponse = callOrderService(draftResult, msg);
-                    
+                    long callDuration = System.currentTimeMillis() - callStart;
+
                     // 构建响应
                     Map<String, Object> responseData = new java.util.HashMap<>();
                     responseData.put("status", "SAVED");
                     responseData.put("message", "已存入草稿池");
                     responseData.put("data", draftResult);
-                    
+
                     // 如果下单成功，添加订单信息
                     if (orderResponse != null && Boolean.TRUE.equals(orderResponse.getSuccess())) {
                         responseData.put("orderId", orderResponse.getOrderId());
                         responseData.put("orderMessage", "下单成功：" + orderResponse.getMessage());
-                        log.info("[traceId={}] 【下单成功】orderId={}, senderId={}",
-                                traceId, orderResponse.getOrderId(), msg.getSenderUserId());
+                        log.info("[traceId={}] [调用成功] 下单完成: orderId={}, duration={}ms, message={}",
+                                traceId, orderResponse.getOrderId(), callDuration, orderResponse.getMessage());
                     } else if (orderResponse != null) {
                         // 下单失败但不影响草稿保存
-                        responseData.put("orderMessage", "下单失败：" + (orderResponse.getErrorMessage() != null 
+                        responseData.put("orderMessage", "下单失败：" + (orderResponse.getErrorMessage() != null
                                 ? orderResponse.getErrorMessage() : orderResponse.getMessage()));
-                        log.warn("[traceId={}] 【下单失败】senderId={}, error={}",
-                                traceId, msg.getSenderUserId(), orderResponse.getErrorMessage());
+                        log.warn("[traceId={}] [调用失败] 下单接口返回错误: duration={}ms, error={}",
+                                traceId, callDuration, orderResponse.getErrorMessage());
+                    } else {
+                         log.error("[traceId={}] [调用异常] 下单接口返回空响应: duration={}ms", traceId, callDuration);
                     }
 
                     return ResponseEntity.ok(responseData);
@@ -279,22 +370,28 @@ public class AgentController {
                 }
             } else {
                 // 情况 B：AI 认为信息不全 (actionable=false)
-                log.warn("[traceId={}] 【拦截入库】原因: {}, 建议追问: {}, senderId={}",
-                        traceId, draftResult.getMissingInfo(), draftResult.getSuggestedReply(), msg.getSenderUserId());
+                String missingInfoStr = draftResult.getMissingInfo() != null ? String.join(",", draftResult.getMissingInfo()) : "";
+                log.warn("[traceId={}] [拦截] 信息不全，拦截入库: missing={}, reply={}",
+                        traceId, missingInfoStr, draftResult.getSuggestedReply());
 
                 // 通知群机器人，提示缺失信息
-                wecomRobotService.sendMissingInfoNotice(
-                        traceId,
-                        msg.getGroupId(),
-                        msg.getSenderUserId(),
-                        draftResult.getMissingInfo(),
-                        draftResult.getSuggestedReply()
-                );
+                try {
+                    wecomRobotService.sendMissingInfoNotice(
+                            traceId,
+                            msg.getGroupId(),
+                            msg.getSenderUserId(),
+                            missingInfoStr,
+                            draftResult.getSuggestedReply()
+                    );
+                    log.info("[traceId={}] [通知] 机器人通知发送成功", traceId);
+                } catch (Exception e) {
+                    log.error("[traceId={}] [通知] 机器人通知发送失败: error={}", traceId, e.getMessage());
+                }
 
                 // 虽然不入库，但我们返回 202 (Accepted)，并告诉调用方 AI 的追问语
                 return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of(
                         "status", "NEED_MORE_INFO",
-                        "missing", draftResult.getMissingInfo() != null ? draftResult.getMissingInfo() : "",
+                        "missing", missingInfoStr,
                         "reply", draftResult.getSuggestedReply() != null ? draftResult.getSuggestedReply() : "",
                         "data", draftResult
                 ));
@@ -321,12 +418,12 @@ public class AgentController {
      * 2. 供侧边栏调用的接口：获取当前群的 AI 建议
      */
     @GetMapping("/drafts")
-    public ResponseEntity<List<TicketDraftEntity>> getGroupDrafts(@RequestParam String groupId) {
+    public ResponseEntity<List<TicketDraftEntity>> getGroupDrafts(@RequestParam(required = false) String groupId) {
         if (groupId == null || groupId.trim().isEmpty()) {
             log.warn("查询工单草稿失败：groupId为空");
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
         }
-        
+
         try {
             List<TicketDraftEntity> drafts = draftService.list(new LambdaQueryWrapper<TicketDraftEntity>()
                     .eq(TicketDraftEntity::getGroupId, groupId)
@@ -339,7 +436,7 @@ public class AgentController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
-    
+
     /**
      * 调用外部下单服务
      * @param draftResult AI分析结果
@@ -399,7 +496,7 @@ public class AgentController {
                     .appointmentStartTime(startTime)
                     .appointmentEndTime(endTime)
                     .build();
-            
+
             // 调用下单服务
             return orderService.createOrder(orderRequest);
         } catch (Exception e) {

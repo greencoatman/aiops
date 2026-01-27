@@ -8,12 +8,12 @@ import com.repair.aiops.service.storage.OssStorageService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 @Component
@@ -22,24 +22,32 @@ public class WecomChatArchiveScheduler {
     private final WecomChatMessageParser wecomChatMessageParser;
     private final OssStorageService ossStorageService;
     private final AgentController agentController;
-    private final AtomicLong lastSeq;
+    private final StringRedisTemplate redisTemplate;
+    
+    private static final String REDIS_SEQ_KEY = "wecom:chat:archive:seq";
 
     @Value("${wecom.chat.archive.poll.enabled:false}")
     private boolean enabled;
 
     @Value("${wecom.chat.archive.poll.limit:50}")
     private int limit;
+    
+    @Value("${wecom.chat.archive.poll.initial-seq:0}")
+    private long initialSeq;
+
+    @Value("${wecom.chat.archive.allowed-groups:}")
+    private String allowedGroups;
 
     public WecomChatArchiveScheduler(WecomChatArchiveService wecomChatArchiveService,
                                      WecomChatMessageParser wecomChatMessageParser,
                                      OssStorageService ossStorageService,
                                      AgentController agentController,
-                                     @Value("${wecom.chat.archive.poll.initial-seq:0}") long initialSeq) {
+                                     StringRedisTemplate redisTemplate) {
         this.wecomChatArchiveService = wecomChatArchiveService;
         this.wecomChatMessageParser = wecomChatMessageParser;
         this.ossStorageService = ossStorageService;
         this.agentController = agentController;
-        this.lastSeq = new AtomicLong(initialSeq);
+        this.redisTemplate = redisTemplate;
     }
 
     @Scheduled(fixedDelayString = "${wecom.chat.archive.poll.interval-ms:30000}")
@@ -47,7 +55,23 @@ public class WecomChatArchiveScheduler {
         if (!enabled) {
             return;
         }
-        long seq = lastSeq.get();
+
+        // 计算今天下午 16:00:00 的时间戳 (临时需求：只处理16点之后的消息)
+        long cutOffTime = java.time.LocalDate.now().atTime(16, 0).toInstant(java.time.ZoneOffset.of("+8")).toEpochMilli();
+        
+        // 1. 获取当前 seq (优先从 Redis 获取，没有则使用初始配置)
+        long seq = initialSeq;
+        String seqStr = redisTemplate.opsForValue().get(REDIS_SEQ_KEY);
+        if (StringUtils.hasText(seqStr)) {
+            try {
+                seq = Long.parseLong(seqStr);
+            } catch (NumberFormatException e) {
+                log.warn("Redis中seq格式错误，重置为初始值: {}", seqStr);
+            }
+        }
+        
+        log.debug("准备拉取消息: currentSeq={}, limit={}", seq, limit);
+
         WecomChatDataResponse response = wecomChatArchiveService.fetchChatData(seq, limit);
         if (response == null || response.getChatdata() == null || response.getChatdata().isEmpty()) {
             return;
@@ -57,6 +81,7 @@ public class WecomChatArchiveScheduler {
         int analyzed = 0;
         int skipped = 0;
         for (WecomChatDataItem item : chatData) {
+            // ... (原有逻辑保持不变)
             String decrypted = item.getDecryptChatMsg();
             if (!StringUtils.hasText(decrypted)) {
                 skipped++;
@@ -67,6 +92,39 @@ public class WecomChatArchiveScheduler {
                 skipped++;
                 continue;
             }
+
+            // --- 新增：提前进行白名单过滤（静默跳过无关群） ---
+            if (StringUtils.hasText(allowedGroups)) {
+                boolean allowed = false;
+                String[] groups = allowedGroups.split(",");
+                for (String g : groups) {
+                    if (g.trim().equals(msg.getGroupId())) {
+                        allowed = true;
+                        break;
+                    }
+                }
+                if (!allowed) {
+                    // 不在白名单，直接跳过，不打印日志
+                    skipped++;
+                    continue;
+                }
+            }
+            
+            // 调试日志：打印每条消息的时间戳
+            log.info("检查消息时间: seq={}, msgTime={}, cutOffTime={}, content={}", 
+                    item.getSeq(), msg.getTimestamp(), cutOffTime, 
+                    (msg.getContent() != null && msg.getContent().length() > 10) ? msg.getContent().substring(0, 10) + "..." : msg.getContent());
+            
+            // --- 修改：只处理指定时间之后的消息 ---
+            // 如果时间戳为空，或者早于截止时间，跳过
+            if (msg.getTimestamp() == null || msg.getTimestamp() < cutOffTime) {
+                if (msg.getTimestamp() == null) {
+                    log.warn("跳过无时间戳消息: seq={}", item.getSeq());
+                }
+                skipped++;
+                continue;
+            }
+
             // 图片处理：如果是 sdkfileid，则拉取并上传 OSS
             if (StringUtils.hasText(msg.getImageUrl())) {
                 String sdkFileId = extractSdkFileId(msg.getImageUrl());
@@ -83,13 +141,17 @@ public class WecomChatArchiveScheduler {
                     }
                 }
             }
+            // 调用 AgentController 处理消息 (利用其白名单逻辑)
             agentController.onGroupMessage(msg);
             analyzed++;
         }
 
+        // 2. 更新 seq 到 Redis
         if (response.getNext_seq() != null && response.getNext_seq() > seq) {
-            lastSeq.set(response.getNext_seq());
+            redisTemplate.opsForValue().set(REDIS_SEQ_KEY, String.valueOf(response.getNext_seq()));
+            log.info("企业微信存档进度已更新: oldSeq={}, newSeq={}", seq, response.getNext_seq());
         }
+        
         log.info("企业微信存档定时拉取完成: seq={}, nextSeq={}, analyzed={}, skipped={}",
                 seq, response.getNext_seq(), analyzed, skipped);
     }

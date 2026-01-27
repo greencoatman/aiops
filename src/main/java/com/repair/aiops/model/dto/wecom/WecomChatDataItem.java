@@ -6,6 +6,9 @@ import lombok.Data;
 @Data
 public class WecomChatDataItem {
     private Long seq;
+    private String msgid;
+    private Integer publickey_ver;
+    private String encrypt_random_key;
 
     @JsonProperty("encrypt_chat_msg")
     private String encryptChatMsg;

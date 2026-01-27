@@ -1,11 +1,20 @@
 package com.repair.aiops.model.dto;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationContext;
+import com.fasterxml.jackson.databind.JsonDeserializer;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.repair.aiops.model.enums.IntentType;
 import com.repair.aiops.model.enums.UrgencyLevel;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * AI 解析后的工单草稿
@@ -54,9 +63,10 @@ public class TicketDraft {
     // --- 客服辅助 (Agent Copilot) ---
 
     /**
-     * 缺失的关键信息：例如业主没说具体位置，AI 会在这里标注 "缺少具体位置"
+     * 缺失的关键信息：例如业主没说具体位置，AI 会在这里标注 ["缺少具体位置"]
      */
-    private String missingInfo;
+    @JsonDeserialize(using = StringToListDeserializer.class)
+    private java.util.List<String> missingInfo;
 
     /**
      * 推荐追问语：AI 生成一段话供管家一键点击发送，如 "好的收到，请问是客厅还是卧室的灯坏了？"
@@ -85,4 +95,22 @@ public class TicketDraft {
     private String ownerName;      // 业主姓名
     private String roomNumber;     // 关联房号
     private String senderId;       // 原始企微/微信 ID
+
+    // --- 自定义反序列化器 ---
+    public static class StringToListDeserializer extends JsonDeserializer<List<String>> {
+        @Override
+        public List<String> deserialize(JsonParser p, DeserializationContext ctxt) throws IOException {
+            if (p.hasToken(com.fasterxml.jackson.core.JsonToken.VALUE_STRING)) {
+                String value = p.getText();
+                if (value == null || value.trim().isEmpty()) {
+                    return new ArrayList<>();
+                }
+                // 兼容单字符串的情况
+                List<String> list = new ArrayList<>();
+                list.add(value);
+                return list;
+            }
+            return p.readValueAs(new TypeReference<List<String>>() {});
+        }
+    }
 }

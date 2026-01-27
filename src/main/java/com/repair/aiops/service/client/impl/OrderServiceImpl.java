@@ -65,11 +65,9 @@ public class OrderServiceImpl implements IOrderService {
         }
         
         try {
-            log.info("调用外部下单接口：url={}, senderId={}, houseId={}, fileCount={}",
-                    orderApiUrl,
-                    request.getSenderId(),
-                    request.getHouseId(),
-                    request.getFileList() != null ? request.getFileList().size() : 0);
+            String traceId = org.slf4j.MDC.get("traceId");
+            log.info("[traceId={}] [下单请求] 开始调用: url={}, senderId={}, houseId={}",
+                    traceId, orderApiUrl, request.getSenderId(), request.getHouseId());
             
             // 设置请求头
             HttpHeaders headers = new HttpHeaders();
@@ -88,19 +86,32 @@ public class OrderServiceImpl implements IOrderService {
             payload.put("appointmentEndTime", request.getAppointmentEndTime());
             payload.put("fileList", request.getFileList() != null ? request.getFileList() : new java.util.ArrayList<>());
             payload.put("houseId", request.getHouseId() != null ? request.getHouseId() : 918);
+            
+            // 打印完整请求体
+            try {
+                String jsonPayload = objectMapper.writeValueAsString(payload);
+                log.info("[traceId={}] [下单请求] Payload: {}", traceId, jsonPayload);
+            } catch (Exception e) {
+                log.warn("[traceId={}] 序列化请求参数失败", traceId);
+            }
 
             HttpEntity<java.util.Map<String, Object>> requestEntity = new HttpEntity<>(payload, headers);
             
             // 发送POST请求
             // 外部API返回text/plain，需要先获取String，再手动转换
+            long start = System.currentTimeMillis();
             ResponseEntity<String> response = restTemplate.exchange(
                     orderApiUrl,
                     HttpMethod.POST,
                     requestEntity,
                     String.class
             );
+            long duration = System.currentTimeMillis() - start;
             
             String responseBody = response.getBody();
+            log.info("[traceId={}] [下单响应] 原始响应: statusCode={}, duration={}ms, body={}", 
+                    traceId, response.getStatusCode().value(), duration, responseBody);
+
             OrderResponse orderResponse = null;
             if (responseBody != null && !responseBody.isEmpty()) {
                 try {
@@ -112,11 +123,9 @@ public class OrderServiceImpl implements IOrderService {
             }
 
             if (orderResponse != null && Boolean.TRUE.equals(orderResponse.getSuccess())) {
-                log.info("下单成功：statusCode={}, orderId={}, senderId={}",
-                        response.getStatusCode().value(), orderResponse.getOrderId(), request.getSenderId());
+                log.info("[traceId={}] [下单结果] 成功: orderId={}", traceId, orderResponse.getOrderId());
             } else {
-                log.warn("下单失败：statusCode={}, response={}, senderId={}",
-                        response.getStatusCode().value(), responseBody, request.getSenderId());
+                log.warn("[traceId={}] [下单结果] 失败或未成功标识: {}", traceId, orderResponse);
             }
             
             return orderResponse != null ? orderResponse : OrderResponse.builder()
@@ -125,14 +134,16 @@ public class OrderServiceImpl implements IOrderService {
                     .build();
                     
         } catch (RestClientException e) {
-            log.error("调用外部下单接口异常：url={}, error={}", orderApiUrl, e.getMessage(), e);
+            String traceId = org.slf4j.MDC.get("traceId");
+            log.error("[traceId={}] [下单异常] 网络/HTTP错误: url={}, error={}", traceId, orderApiUrl, e.getMessage(), e);
             return OrderResponse.builder()
                     .success(false)
                     .errorCode("API_CALL_ERROR")
                     .errorMessage("调用外部下单接口失败：" + e.getMessage())
                     .build();
         } catch (Exception e) {
-            log.error("下单处理异常：request={}, error={}", request, e.getMessage(), e);
+            String traceId = org.slf4j.MDC.get("traceId");
+            log.error("[traceId={}] [下单异常] 系统内部错误: error={}", traceId, e.getMessage(), e);
             return OrderResponse.builder()
                     .success(false)
                     .errorCode("INTERNAL_ERROR")

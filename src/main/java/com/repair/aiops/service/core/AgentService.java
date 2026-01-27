@@ -105,20 +105,26 @@ public class AgentService {
                 // 收集所有图片（包括历史消息和当前消息）
                 if (messageContext != null && messageContext.getImageUrls() != null) {
                     for (String imageUrl : messageContext.getImageUrls()) {
-                        try {
-                            imageMedias.add(new Media(MimeTypeUtils.IMAGE_JPEG, new java.net.URL(imageUrl)));
-                        } catch (Exception e) {
-                            log.warn("添加历史图片失败：imageUrl={}, error={}", imageUrl, e.getMessage());
+                        if (imageUrl != null && imageUrl.startsWith("http")) {
+                            try {
+                                imageMedias.add(new Media(MimeTypeUtils.IMAGE_JPEG, new java.net.URL(imageUrl)));
+                            } catch (Exception e) {
+                                log.warn("添加历史图片失败：imageUrl={}, error={}", imageUrl, e.getMessage());
+                            }
                         }
                     }
                 }
                 
                 // 添加当前消息的图片
                 if (msg.getImageUrl() != null && !msg.getImageUrl().isEmpty()) {
-                    try {
-                        imageMedias.add(new Media(MimeTypeUtils.IMAGE_JPEG, new java.net.URL(msg.getImageUrl())));
-                    } catch (Exception e) {
-                        log.warn("添加当前图片失败：imageUrl={}, error={}", msg.getImageUrl(), e.getMessage());
+                    if (msg.getImageUrl().startsWith("http")) {
+                        try {
+                            imageMedias.add(new Media(MimeTypeUtils.IMAGE_JPEG, new java.net.URL(msg.getImageUrl())));
+                        } catch (Exception e) {
+                            log.warn("添加当前图片失败：imageUrl={}, error={}", msg.getImageUrl(), e.getMessage());
+                        }
+                    } else {
+                        log.warn("当前图片URL无效（非HTTP链接，可能OSS上传失败）：imageUrl={}", msg.getImageUrl());
                     }
                 }
                 
@@ -139,23 +145,48 @@ public class AgentService {
             // 5. 调用 AI 决策大脑
             TicketDraft draft;
             try {
-                log.info("开始AI分析：senderId={}, contentLength={}, hasHistory={}, hasImage={}",
+                String traceId = org.slf4j.MDC.get("traceId");
+                log.info("[traceId={}] [AI请求] 开始AI分析：senderId={}, contentLength={}, hasHistory={}, hasImage={}",
+                        traceId,
                         msg.getSenderUserId(),
                         msg.getContent() != null ? msg.getContent().length() : 0,
                         history != null && !history.isEmpty(),
                         msg.getImageUrl() != null && !msg.getImageUrl().isEmpty());
-                draft = chatClient.prompt()
+                
+                // 仅在 DEBUG 级别打印完整 Prompt，避免生产日志过大
+                if (log.isDebugEnabled()) {
+                    log.debug("[traceId={}] [AI请求] System Prompt 预览: {}", traceId, 
+                            systemPrompt.length() > 500 ? systemPrompt.substring(0, 500) + "..." : systemPrompt);
+                }
+                
+                long aiStart = System.currentTimeMillis();
+                
+                // 实际调用
+                org.springframework.ai.chat.model.ChatResponse response = chatClient.prompt()
                         .system(systemPrompt)
                         .messages(userMessage)
                         .call()
-                        .entity(TicketDraft.class);
+                        .chatResponse();
+                
+                // 提取实体对象
+                draft = converter.convert(response.getResult().getOutput().getContent());
+                
+                long aiDuration = System.currentTimeMillis() - aiStart;
+                
+                // 获取 Token 使用情况 (如果支持)
+                org.springframework.ai.chat.metadata.Usage usage = response.getMetadata().getUsage();
+                // 简化处理：直接转字符串，避免因 Spring AI 版本差异导致的方法名报错
+                String tokenUsage = (usage != null) ? usage.toString() : "unknown";
+
+                log.info("[traceId={}] [AI响应] 分析完成: duration={}ms, usage=[{}], result={actionable={}, intent={}, confidence={}}",
+                        traceId, aiDuration, tokenUsage,
+                        draft != null ? draft.isActionable() : "null",
+                        draft != null ? draft.getIntent() : "null",
+                        draft != null ? draft.getConfidence() : "null");
+
             } catch (Exception e) {
-                log.error("AI分析调用失败：senderId={}, error={}", msg.getSenderUserId(), e.getMessage(), e);
+                log.error("[AI异常] AI分析调用失败：senderId={}, error={}", msg.getSenderUserId(), e.getMessage(), e);
                 throw new RuntimeException("AI分析失败: " + e.getMessage(), e);
-            }
-            if (draft != null) {
-                log.info("AI分析完成：senderId={}, actionable={}, intent={}, confidence={}",
-                        msg.getSenderUserId(), draft.isActionable(), draft.getIntent(), draft.getConfidence());
             }
 
             // 6. 闭环记忆处理逻辑
