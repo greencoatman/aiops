@@ -80,25 +80,35 @@ public class WecomRobotService {
         content.append("【").append(appName).append("】报修信息不完整\n");
         
         if (groupName != null) {
-            content.append("群名: ").append(groupName).append("\n");
+            content.append("📍 群名: ").append(groupName).append("\n");
         } else {
-            content.append("群ID: ").append(groupId).append("\n");
+            content.append("📍 群ID: ").append(groupId).append("\n");
         }
         
         if (senderName != null) {
-            content.append("发送者: ").append(senderName).append("\n");
+            content.append("👤 发送者: ").append(senderName).append("\n");
         } else {
-            content.append("发送者ID: ").append(senderId).append("\n");
+            content.append("👤 发送者ID: ").append(senderId).append("\n");
         }
 
         if (StringUtils.hasText(missingInfo)) {
-            content.append("缺失信息: ").append(missingInfo).append("\n");
+            content.append("❓ 缺失信息: ").append(missingInfo).append("\n");
         }
+        
         if (StringUtils.hasText(suggestedReply)) {
-            content.append("建议回复: ").append(suggestedReply).append("\n");
+            content.append("------------------------------\n");
+            content.append("请复制回复：\n");
+            if (senderName != null) {
+                content.append("@").append(senderName).append(" ");
+            } else {
+                content.append("@").append(senderId).append(" ");
+            }
+            content.append(suggestedReply).append("\n");
+            content.append("------------------------------\n");
         }
+        
         if (StringUtils.hasText(traceId)) {
-            content.append("traceId: ").append(traceId);
+            content.append("TraceId: ").append(traceId);
         }
 
         // 1. 尝试发送应用消息 (私聊)
@@ -123,29 +133,59 @@ public class WecomRobotService {
 
     /**
      * 发送工单处理结果通知
+     * @param originalContent 原始报修内容（新增参数）
      */
     public void sendOrderResultNotice(String traceId, String groupId, String senderId,
-                                      boolean success, String message, Object orderData) {
+                                      boolean success, String message, Object orderData, String originalContent) {
         // 尝试解析名称（失败则回退到ID）
         String groupName = resolveGroupName(groupId);
         String senderName = resolveUserName(senderId);
 
         StringBuilder content = new StringBuilder();
-        content.append("【").append(appName).append("】处理完成\n");
-        content.append("状态: ").append(success ? "✅ 下单成功" : "❌ 下单失败").append("\n");
-        if (groupName != null) {
-            content.append("群名: ").append(groupName).append("\n");
-        } else if (StringUtils.hasText(groupId)) {
-            content.append("群ID: ").append(groupId).append("\n");
-        }
-        if (senderName != null) {
-            content.append("发送者: ").append(senderName).append("\n");
+        content.append("【").append(appName).append("】");
+        if (success) {
+            content.append("报修工单已生成\n");
         } else {
-            content.append("发送者ID: ").append(senderId).append("\n");
+            content.append("报修提交失败\n");
         }
-        content.append("详情: ").append(message);
+        // content.append("状态: ").append(success ? "✅ 下单成功" : "❌ 下单失败").append("\n"); // 状态行可以简化，标题已经体现
+        
+        if (groupName != null) {
+            content.append("📍 群名: ").append(groupName).append("\n");
+        } else if (StringUtils.hasText(groupId)) {
+            content.append("📍 群ID: ").append(groupId).append("\n");
+        }
+        
+        if (senderName != null) {
+            content.append("👤 发送者: ").append(senderName).append("\n");
+        } else {
+            content.append("👤 发送者ID: ").append(senderId).append("\n");
+        }
+        
+        // --- 统一使用“报修内容” ---
+        String contentText = StringUtils.hasText(originalContent) ? originalContent : message;
+        content.append("📋 报修内容: ").append(contentText).append("\n");
+        
+        // --- 增加可复制的建议回复 ---
+        content.append("------------------------------\n");
+        content.append("请复制回复：\n");
+        if (senderName != null) {
+            content.append("@").append(senderName).append(" ");
+        } else {
+            content.append("@").append(senderId).append(" ");
+        }
+        
+        if (success) {
+            // 尝试从 message 或 orderData 中提取单号（这里简化处理）
+            content.append("您的报修已收到，我们会尽快安排维修人员上门，请保持电话畅通。");
+        } else {
+            content.append("抱歉，报修提交遇到问题，请稍后重试或直接联系管家。");
+        }
+        content.append("\n------------------------------\n");
+        // ---------------------------
+
         if (StringUtils.hasText(traceId)) {
-            content.append("\nTraceId: ").append(traceId);
+            content.append("TraceId: ").append(traceId);
         }
 
         if (appEnabled) {

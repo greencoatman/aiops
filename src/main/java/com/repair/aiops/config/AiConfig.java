@@ -59,4 +59,16 @@ public class AiConfig {
             System.out.println("DEBUG: spring.cloud.ai.tongyi.api-key=" + env.getProperty("spring.cloud.ai.tongyi.api-key"));
         };
     }
+
+    /**
+     * 配置带超时的 RestTemplate
+     * 解决调用外部接口无响应导致的线程卡死问题
+     */
+    @Bean
+    public org.springframework.web.client.RestTemplate restTemplate() {
+        org.springframework.http.client.SimpleClientHttpRequestFactory factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(3000); // 连接超时：3秒
+        factory.setReadTimeout(10000);   // 读取超时：10秒
+        return new org.springframework.web.client.RestTemplate(factory);
+    }
 }

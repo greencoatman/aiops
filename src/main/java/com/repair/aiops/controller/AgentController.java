@@ -349,14 +349,54 @@ public class AgentController {
                         responseData.put("orderMessage", "下单成功：" + orderResponse.getMessage());
                         log.info("[traceId={}] [调用成功] 下单完成: orderId={}, duration={}ms, message={}",
                                 traceId, orderResponse.getOrderId(), callDuration, orderResponse.getMessage());
+                        
+                        // --- 发送成功通知 ---
+                        try {
+                            wecomRobotService.sendOrderResultNotice(
+                                traceId, msg.getGroupId(), msg.getSenderUserId(),
+                                true, 
+                                "工单已生成，单号：" + orderResponse.getOrderId(), 
+                                orderResponse,
+                                msg.getContent() // 传入原始报修内容
+                            );
+                        } catch (Exception e) {
+                            log.error("发送下单成功通知失败", e);
+                        }
+
                     } else if (orderResponse != null) {
                         // 下单失败但不影响草稿保存
-                        responseData.put("orderMessage", "下单失败：" + (orderResponse.getErrorMessage() != null
-                                ? orderResponse.getErrorMessage() : orderResponse.getMessage()));
+                        String failMsg = (orderResponse.getErrorMessage() != null ? orderResponse.getErrorMessage() : orderResponse.getMessage());
+                        responseData.put("orderMessage", "下单失败：" + failMsg);
                         log.warn("[traceId={}] [调用失败] 下单接口返回错误: duration={}ms, error={}",
-                                traceId, callDuration, orderResponse.getErrorMessage());
+                                traceId, callDuration, failMsg);
+                                
+                        // --- 发送失败通知 ---
+                        try {
+                            wecomRobotService.sendOrderResultNotice(
+                                traceId, msg.getGroupId(), msg.getSenderUserId(),
+                                false, 
+                                "下单失败：" + failMsg, 
+                                orderResponse,
+                                msg.getContent() // 传入原始报修内容
+                            );
+                        } catch (Exception e) {
+                            log.error("发送下单失败通知失败", e);
+                        }
+
                     } else {
                          log.error("[traceId={}] [调用异常] 下单接口返回空响应: duration={}ms", traceId, callDuration);
+                         // --- 发送异常通知 ---
+                         try {
+                             wecomRobotService.sendOrderResultNotice(
+                                 traceId, msg.getGroupId(), msg.getSenderUserId(),
+                                 false, 
+                                 "下单接口无响应", 
+                                 null,
+                                 msg.getContent()
+                             );
+                         } catch (Exception e) {
+                             log.error("发送下单异常通知失败", e);
+                         }
                     }
 
                     return ResponseEntity.ok(responseData);
