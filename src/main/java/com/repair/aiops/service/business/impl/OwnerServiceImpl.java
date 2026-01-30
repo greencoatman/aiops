@@ -36,6 +36,11 @@ public class OwnerServiceImpl extends ServiceImpl<OwnerMapper, Owner> implements
 
     @Override
     public void bindOwner(String senderId, String roomNumber, String name) {
+        bindOwner(senderId, roomNumber, name, null);
+    }
+
+    @Override
+    public void bindOwner(String senderId, String roomNumber, String name, String wechatName) {
         if (senderId == null || senderId.trim().isEmpty()) {
             log.warn("绑定业主失败：senderId为空");
             throw new IllegalArgumentException("发送者ID不能为空");
@@ -50,11 +55,19 @@ public class OwnerServiceImpl extends ServiceImpl<OwnerMapper, Owner> implements
             }
 
             owner.setSenderId(senderId);
-            owner.setRoomNumber(roomNumber);
-            owner.setOwnerName(name);
+            if (roomNumber != null && !roomNumber.trim().isEmpty()) {
+                owner.setRoomNumber(roomNumber);
+            }
+            if (name != null && !name.trim().isEmpty()) {
+                owner.setOwnerName(name);
+            }
+            if (wechatName != null && !wechatName.trim().isEmpty()) {
+                owner.setWechatName(wechatName.trim());
+            }
 
             this.saveOrUpdate(owner);
-            log.info("绑定业主成功：senderId={}, roomNumber={}, name={}", senderId, roomNumber, name);
+            log.info("绑定业主成功：senderId={}, roomNumber={}, name={}, wechatName={}",
+                    senderId, roomNumber, name, owner.getWechatName());
         } catch (Exception e) {
             log.error("绑定业主异常：senderId={}, error={}", senderId, e.getMessage(), e);
             throw new RuntimeException("绑定业主失败：" + e.getMessage(), e);

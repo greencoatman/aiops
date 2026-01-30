@@ -132,6 +132,19 @@ public class WecomRobotService {
     }
 
     /**
+     * 获取发送者昵称（缓存/接口解析）
+     */
+    public String resolveSenderName(String senderId) {
+        String name = resolveUserName(senderId);
+        if (!StringUtils.hasText(name)) {
+            log.warn("未获取到微信昵称: senderId={}", senderId);
+        } else {
+            log.info("解析微信昵称成功: senderId={}, name={}", senderId, name);
+        }
+        return name;
+    }
+
+    /**
      * 发送工单处理结果通知
      * @param originalContent 原始报修内容（新增参数）
      */
@@ -144,9 +157,9 @@ public class WecomRobotService {
         StringBuilder content = new StringBuilder();
         content.append("【").append(appName).append("】");
         if (success) {
-            content.append("报修工单已生成\n");
+            content.append("工单已生成\n");
         } else {
-            content.append("报修提交失败\n");
+            content.append("工单提交失败\n");
         }
         // content.append("状态: ").append(success ? "✅ 下单成功" : "❌ 下单失败").append("\n"); // 状态行可以简化，标题已经体现
         
@@ -164,7 +177,7 @@ public class WecomRobotService {
         
         // --- 统一使用“报修内容” ---
         String contentText = StringUtils.hasText(originalContent) ? originalContent : message;
-        content.append("📋 报修内容: ").append(contentText).append("\n");
+        content.append("📋 工单内容: ").append(contentText).append("\n");
         
         // --- 增加可复制的建议回复 ---
         content.append("------------------------------\n");
@@ -176,10 +189,9 @@ public class WecomRobotService {
         }
         
         if (success) {
-            // 尝试从 message 或 orderData 中提取单号（这里简化处理）
-            content.append("您的报修已收到，我们会尽快安排维修人员上门，请保持电话畅通。");
+            content.append("您的工单已收到，我们已安排人员处理，请保持电话畅通。");
         } else {
-            content.append("抱歉，报修提交遇到问题，请稍后重试或直接联系管家。");
+            content.append("抱歉，工单提交遇到问题，请稍后重试或直接联系管家。");
         }
         content.append("\n------------------------------\n");
         // ---------------------------
@@ -196,7 +208,7 @@ public class WecomRobotService {
         }
         if (customerGroupEnabled && StringUtils.hasText(groupId)) {
             // 对客户群只发送简短结果，避免过多内部字段，并带上“@姓名”提示
-            String brief = success ? "报修已提交成功，我们会尽快安排人员处理。" : "报修提交失败，请稍后重试或联系管理员。";
+            String brief = success ? "工单已提交成功，我们已安排人员处理。" : "工单提交失败，请稍后重试或联系管理员。";
             String mentionName = StringUtils.hasText(senderName) ? senderName : senderId;
             String customerReply = buildCustomerGroupMention(mentionName, brief);
             sendCustomerGroupMessage(traceId, groupId, customerReply);

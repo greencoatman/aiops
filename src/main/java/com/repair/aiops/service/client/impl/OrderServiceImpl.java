@@ -66,8 +66,8 @@ public class OrderServiceImpl implements IOrderService {
         
         try {
             String traceId = org.slf4j.MDC.get("traceId");
-            log.info("[traceId={}] [下单请求] 开始调用: url={}, senderId={}, houseId={}",
-                    traceId, orderApiUrl, request.getSenderId(), request.getHouseId());
+            log.info("[traceId={}] [下单请求] 开始调用: url={}, senderId={}, houseId={}, userId={}",
+                    traceId, orderApiUrl, request.getSenderId(), request.getHouseId(), request.getUserId());
             
             // 设置请求头
             HttpHeaders headers = new HttpHeaders();
@@ -81,11 +81,22 @@ public class OrderServiceImpl implements IOrderService {
             java.util.Map<String, Object> payload = new java.util.HashMap<>();
             payload.put("type", 1); // 1-报修
             payload.put("category", 5); // 5-默认分类(或根据request.category映射)
-            payload.put("description", request.getDescription());
+            String description = request.getDescription();
+            String location = request.getLocation();
+            if (location != null && !location.trim().isEmpty()) {
+                if (description == null || description.trim().isEmpty()) {
+                    description = "位置：" + location.trim();
+                } else if (!description.contains(location.trim())) {
+                    description = "位置：" + location.trim() + "；" + description.trim();
+                }
+            }
+            payload.put("description", description);
+            payload.put("location", request.getLocation());
             payload.put("appointmentStartTime", request.getAppointmentStartTime());
             payload.put("appointmentEndTime", request.getAppointmentEndTime());
             payload.put("fileList", request.getFileList() != null ? request.getFileList() : new java.util.ArrayList<>());
             payload.put("houseId", request.getHouseId() != null ? request.getHouseId() : 918);
+            payload.put("userId", request.getUserId());
             
             // 打印完整请求体
             try {
@@ -118,7 +129,23 @@ public class OrderServiceImpl implements IOrderService {
                     orderResponse = objectMapper.readValue(responseBody, OrderResponse.class);
                 } catch (Exception e) {
                     log.warn("解析下单响应JSON失败: {}", responseBody, e);
-                    // 尝试作为普通字符串处理或忽略
+                }
+            }
+
+            // 兼容外部接口仅返回 code/msg 的情况
+            if (orderResponse == null || orderResponse.getSuccess() == null) {
+                try {
+                    com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(responseBody);
+                    int code = node.has("code") ? node.get("code").asInt() : -1;
+                    String msg = node.has("msg") ? node.get("msg").asText() : null;
+                    if (code == 200) {
+                        orderResponse = OrderResponse.builder()
+                                .success(true)
+                                .message(msg != null ? msg : "下单成功")
+                                .build();
+                    }
+                } catch (Exception e) {
+                    log.warn("兼容解析下单响应失败: {}", responseBody, e);
                 }
             }
 

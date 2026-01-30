@@ -38,6 +38,9 @@ public class WecomChatArchiveScheduler {
     @Value("${wecom.chat.archive.allowed-groups:}")
     private String allowedGroups;
 
+    @Value("${wecom.chat.archive.poll.cutoff-hour:-1}")
+    private int cutOffHour;
+
     public WecomChatArchiveScheduler(WecomChatArchiveService wecomChatArchiveService,
                                      WecomChatMessageParser wecomChatMessageParser,
                                      OssStorageService ossStorageService,
@@ -67,8 +70,14 @@ public class WecomChatArchiveScheduler {
         }
 
         try {
-            // 计算今天下午 16:00:00 的时间戳 (临时需求：只处理16点之后的消息)
-            long cutOffTime = java.time.LocalDate.now().atTime(16, 0).toInstant(java.time.ZoneOffset.of("+8")).toEpochMilli();
+            // 可选的时间过滤：只处理指定小时之后的消息（默认关闭）
+            long cutOffTime = -1;
+            if (cutOffHour >= 0 && cutOffHour <= 23) {
+                cutOffTime = java.time.LocalDate.now()
+                        .atTime(cutOffHour, 0)
+                        .toInstant(java.time.ZoneOffset.of("+8"))
+                        .toEpochMilli();
+            }
             
             // 1. 获取当前 seq (优先从 Redis 获取，没有则使用初始配置)
             long seq = initialSeq;
@@ -121,19 +130,29 @@ public class WecomChatArchiveScheduler {
                     }
                 }
                 
+                long rawTs = msg.getTimestamp() != null ? msg.getTimestamp() : 0L;
+                long normalizedTs = normalizeTimestamp(rawTs);
+                if (normalizedTs > 0) {
+                    msg.setTimestamp(normalizedTs);
+                }
                 // 调试日志：打印每条消息的时间戳
-                log.info("检查消息时间: seq={}, msgTime={}, cutOffTime={}, content={}", 
-                        item.getSeq(), msg.getTimestamp(), cutOffTime, 
+                log.info("检查消息时间: seq={}, msgTimeRaw={}, msgTime={}, cutOffTime={}, content={}",
+                        item.getSeq(), rawTs, normalizedTs, cutOffTime,
                         (msg.getContent() != null && msg.getContent().length() > 10) ? msg.getContent().substring(0, 10) + "..." : msg.getContent());
                 
                 // --- 修改：只处理指定时间之后的消息 ---
                 // 如果时间戳为空，或者早于截止时间，跳过
-                if (msg.getTimestamp() == null || msg.getTimestamp() < cutOffTime) {
-                    if (msg.getTimestamp() == null) {
-                        log.warn("跳过无时间戳消息: seq={}", item.getSeq());
+                if (cutOffTime > 0) {
+                    if (msg.getTimestamp() == null || msg.getTimestamp() < cutOffTime) {
+                        if (msg.getTimestamp() == null) {
+                            log.warn("跳过无时间戳消息: seq={}", item.getSeq());
+                        } else {
+                            log.info("跳过早于截止时间的消息: seq={}, msgTime={}, cutOffTime={}",
+                                    item.getSeq(), msg.getTimestamp(), cutOffTime);
+                        }
+                        skipped++;
+                        continue;
                     }
-                    skipped++;
-                    continue;
                 }
 
                 // 图片处理：如果是 sdkfileid，则拉取并上传 OSS
@@ -183,5 +202,21 @@ public class WecomChatArchiveScheduler {
             return imageUrl.substring(idx + 1);
         }
         return null;
+    }
+
+    private long normalizeTimestamp(long ts) {
+        if (ts <= 0) {
+            return ts;
+        }
+        // 秒级时间戳
+        if (ts < 1_000_000_000_000L) {
+            return ts * 1000;
+        }
+        // 微秒级时间戳
+        if (ts > 1_000_000_000_000_000L) {
+            return ts / 1000;
+        }
+        // 毫秒级时间戳
+        return ts;
     }
 }

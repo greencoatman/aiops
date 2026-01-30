@@ -48,6 +48,19 @@ public class AgentService {
         }
 
         try {
+            // 0.1 纯数字/无效内容直接视为闲聊，避免误触发追问
+            String rawContent = msg.getContent() != null ? msg.getContent().trim() : "";
+            if (rawContent.matches("^\\d{1,10}$") && (msg.getImageUrl() == null || msg.getImageUrl().isEmpty())) {
+                log.info("识别为闲聊(纯数字)，不触发处理：senderId={}, content={}", msg.getSenderUserId(), rawContent);
+                return TicketDraft.builder()
+                        .actionable(false)
+                        .intent(IntentType.NOISE)
+                        .confidence(0.2)
+                        .suggestedReply(null)
+                        .missingInfo(new java.util.ArrayList<>())
+                        .build();
+            }
+
             // 0. 消息去重检查
             if (dedupService.isDuplicate(msg.getSenderUserId(), msg.getContent())) {
                 log.info("检测到重复消息，跳过处理：senderId={}, content={}", 
@@ -128,13 +141,23 @@ public class AgentService {
                     }
                 }
                 
-                // 构建用户消息
+                // 构建用户消息（合并历史上下文，避免上下文丢失）
                 String userContent = msg.getContent() != null ? msg.getContent() : "";
+                String combinedContent = userContent;
+                if (history != null && !history.isEmpty()) {
+                    if (userContent == null || userContent.trim().isEmpty()) {
+                        combinedContent = history;
+                    } else if (!history.contains(userContent)) {
+                        combinedContent = history + "；" + userContent;
+                    } else {
+                        combinedContent = history;
+                    }
+                }
                 if (!imageMedias.isEmpty()) {
-                    userMessage = new UserMessage(userContent, imageMedias);
+                    userMessage = new UserMessage(combinedContent, imageMedias);
                     log.debug("构建多模态消息：senderId={}, 图片数={}", msg.getSenderUserId(), imageMedias.size());
                 } else {
-                    userMessage = new UserMessage(userContent);
+                    userMessage = new UserMessage(combinedContent);
                 }
             } catch (Exception e) {
                 log.warn("构建多模态消息失败，退化为纯文本模式：senderId={}, error={}", 
@@ -146,12 +169,17 @@ public class AgentService {
             TicketDraft draft;
             try {
                 String traceId = org.slf4j.MDC.get("traceId");
-                log.info("[traceId={}] [AI请求] 开始AI分析：senderId={}, contentLength={}, hasHistory={}, hasImage={}",
+                String contentPreview = msg.getContent() != null ? msg.getContent().trim() : "";
+                if (contentPreview.length() > 50) {
+                    contentPreview = contentPreview.substring(0, 50) + "...";
+                }
+                log.info("[traceId={}] [AI请求] 开始AI分析：senderId={}, contentLength={}, hasHistory={}, hasImage={}, content={}",
                         traceId,
                         msg.getSenderUserId(),
                         msg.getContent() != null ? msg.getContent().length() : 0,
                         history != null && !history.isEmpty(),
-                        msg.getImageUrl() != null && !msg.getImageUrl().isEmpty());
+                        msg.getImageUrl() != null && !msg.getImageUrl().isEmpty(),
+                        contentPreview);
                 
                 // 仅在 DEBUG 级别打印完整 Prompt，避免生产日志过大
                 if (log.isDebugEnabled()) {
@@ -183,6 +211,9 @@ public class AgentService {
                         draft != null ? draft.isActionable() : "null",
                         draft != null ? draft.getIntent() : "null",
                         draft != null ? draft.getConfidence() : "null");
+                if (draft != null && draft.getIntent() == IntentType.NOISE) {
+                    log.info("[traceId={}] [AI响应] NOISE内容: {}", traceId, contentPreview);
+                }
 
             } catch (Exception e) {
                 log.error("[AI异常] AI分析调用失败：senderId={}, error={}", msg.getSenderUserId(), e.getMessage(), e);

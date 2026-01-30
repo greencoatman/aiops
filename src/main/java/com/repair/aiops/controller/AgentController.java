@@ -10,6 +10,10 @@ import com.repair.aiops.model.entity.TicketDraftEntity;
 import com.repair.aiops.model.dto.wecom.WecomChatDataItem;
 import com.repair.aiops.model.dto.wecom.WecomChatDataResponse;
 import com.repair.aiops.model.dto.wecom.WecomChatFetchRequest;
+import com.repair.aiops.model.enums.IntentType;
+import com.repair.aiops.mapper.CUserMapper;
+import com.repair.aiops.model.dto.CommunityHouseOwnerInfo;
+import com.repair.aiops.service.business.ICommunityHouseService;
 import com.repair.aiops.service.business.ITicketDraftService;
 import com.repair.aiops.service.client.IOrderService;
 import com.repair.aiops.service.core.AgentService;
@@ -45,6 +49,12 @@ public class AgentController {
     private com.repair.aiops.service.business.IOwnerService ownerService;
 
     @Autowired
+    private ICommunityHouseService communityHouseService;
+
+    @Autowired
+    private CUserMapper cUserMapper;
+
+    @Autowired
     private ITicketDraftService draftService; // MyBatis-Plus Service
 
     @Autowired
@@ -70,6 +80,9 @@ public class AgentController {
 
     @Value("${wecom.chat.archive.allowed-groups:}")
     private String allowedGroups;
+
+    @Value("${wecom.group.community-mapping:}")
+    private String groupCommunityMapping;
 
     public AgentController(AgentService agentService, IOrderService orderService) {
         this.agentService = agentService;
@@ -315,6 +328,30 @@ public class AgentController {
                     draftResult.getSuggestedReply(),
                     draftResult.getConfidence());
 
+            // 只要拿到任何有效信息，就提前绑定到 owners（不依赖下单成功）
+            try {
+                String rawLocation = draftResult.getLocation() != null
+                        ? draftResult.getLocation()
+                        : draftResult.getRoomNumber();
+                if (rawLocation == null || rawLocation.trim().isEmpty()) {
+                    com.repair.aiops.model.entity.Owner owner = ownerService.getOne(
+                            new LambdaQueryWrapper<com.repair.aiops.model.entity.Owner>()
+                                    .eq(com.repair.aiops.model.entity.Owner::getSenderId, msg.getSenderUserId()));
+                    if (owner != null && owner.getRoomNumber() != null && !owner.getRoomNumber().trim().isEmpty()) {
+                        rawLocation = owner.getRoomNumber();
+                    }
+                }
+                String normalizedRoom = communityHouseService.normalizeLocation(rawLocation);
+                String wechatName = wecomRobotService.resolveSenderName(msg.getSenderUserId());
+                String ownerName = draftResult.getOwnerName();
+                if (ownerName == null || ownerName.trim().isEmpty()) {
+                    ownerName = wechatName;
+                }
+                ownerService.bindOwner(msg.getSenderUserId(), normalizedRoom, ownerName, wechatName);
+            } catch (Exception e) {
+                log.error("提前绑定业主失败", e);
+            }
+
             // 2. 逻辑分流处理
             if (draftResult.isActionable()) {
                 // 情况 A：AI 认为报修要素齐全 (位置+描述都有了)
@@ -349,6 +386,24 @@ public class AgentController {
                         responseData.put("orderMessage", "下单成功：" + orderResponse.getMessage());
                         log.info("[traceId={}] [调用成功] 下单完成: orderId={}, duration={}ms, message={}",
                                 traceId, orderResponse.getOrderId(), callDuration, orderResponse.getMessage());
+
+                        // 下单成功后，自动绑定房号（标准化后写入）
+                        try {
+                            String rawLocation = draftResult.getLocation() != null
+                                    ? draftResult.getLocation()
+                                    : draftResult.getRoomNumber();
+                            String normalizedRoom = communityHouseService.normalizeLocation(rawLocation);
+                            if (normalizedRoom != null && !normalizedRoom.trim().isEmpty()) {
+                                String ownerName = draftResult.getOwnerName();
+                                String wechatName = wecomRobotService.resolveSenderName(msg.getSenderUserId());
+                                if (ownerName == null || ownerName.trim().isEmpty()) {
+                                    ownerName = wechatName;
+                                }
+                                ownerService.bindOwner(msg.getSenderUserId(), normalizedRoom, ownerName, wechatName);
+                            }
+                        } catch (Exception e) {
+                            log.error("自动绑定业主失败", e);
+                        }
                         
                         // --- 发送成功通知 ---
                         try {
@@ -409,6 +464,13 @@ public class AgentController {
                     ));
                 }
             } else {
+                if (draftResult.getIntent() == IntentType.NOISE) {
+                    log.info("[traceId={}] [过滤] 闲聊消息，不触发追问: senderId={}", traceId, msg.getSenderUserId());
+                    return ResponseEntity.ok(Map.of(
+                            "status", "NOISE",
+                            "message", "闲聊消息不处理"
+                    ));
+                }
                 // 情况 B：AI 认为信息不全 (actionable=false)
                 String missingInfoStr = draftResult.getMissingInfo() != null ? String.join(",", draftResult.getMissingInfo()) : "";
                 log.warn("[traceId={}] [拦截] 信息不全，拦截入库: missing={}, reply={}",
@@ -486,17 +548,51 @@ public class AgentController {
     private OrderResponse callOrderService(TicketDraft draftResult, GroupMsgDTO msg) {
         try {
             // 获取房屋ID (假设Owner的ID即为houseId，或者需要另外的映射逻辑)
-            Long houseId = 918L; // 默认值，防止空指针
+            Long houseId = null;
+            Long userId = null;
             try {
-                com.repair.aiops.model.entity.Owner owner = ownerService.getOne(
-                        new LambdaQueryWrapper<com.repair.aiops.model.entity.Owner>()
-                        .eq(com.repair.aiops.model.entity.Owner::getSenderId, draftResult.getSenderId()));
-                if (owner != null) {
-                    houseId = owner.getId();
+                String communityId = resolveCommunityId(msg.getGroupId());
+                String rawLocation = draftResult.getLocation() != null
+                        ? draftResult.getLocation()
+                        : draftResult.getRoomNumber();
+                log.info("[traceId={}] houseId解析入参: rawLocation={}, senderId={}, communityId={}",
+                        MDC.get("traceId"), rawLocation, draftResult.getSenderId(), communityId);
+
+                CommunityHouseOwnerInfo info = communityHouseService.resolveHouseAndOwner(rawLocation, communityId);
+                if (info != null) {
+                    houseId = info.getHouseId();
+                    userId = resolveUserIdByPhone(info.getOwnerPhone());
+                }
+
+                if (houseId == null) {
+                    log.info("[traceId={}] houseId解析为空，尝试使用绑定房号: senderId={}",
+                            MDC.get("traceId"), msg.getSenderUserId());
+                    com.repair.aiops.model.entity.Owner owner = ownerService.getOne(
+                            new LambdaQueryWrapper<com.repair.aiops.model.entity.Owner>()
+                            .eq(com.repair.aiops.model.entity.Owner::getSenderId, msg.getSenderUserId()));
+                    if (owner != null && owner.getRoomNumber() != null && !owner.getRoomNumber().trim().isEmpty()) {
+                        log.info("[traceId={}] 使用绑定房号解析: roomNumber={}",
+                                MDC.get("traceId"), owner.getRoomNumber());
+                        CommunityHouseOwnerInfo fallbackInfo = communityHouseService.resolveHouseAndOwner(owner.getRoomNumber(), communityId);
+                        if (fallbackInfo != null) {
+                            houseId = fallbackInfo.getHouseId();
+                            if (userId == null) {
+                                userId = resolveUserIdByPhone(fallbackInfo.getOwnerPhone());
+                            }
+                        }
+                    }
                 }
             } catch (Exception e) {
-                log.warn("获取房屋ID失败，使用默认值：senderId={}", draftResult.getSenderId());
+                log.warn("获取房屋ID失败：senderId={}", draftResult.getSenderId());
             }
+
+            if (houseId == null) {
+                houseId = 918L; // 默认值，防止空指针
+                log.warn("未解析到houseId，使用默认值: senderId={}, location={}",
+                        draftResult.getSenderId(), draftResult.getLocation());
+            }
+            log.info("[traceId={}] 下单关键参数: communityId={}, houseId={}, userId={}, senderId={}",
+                    MDC.get("traceId"), resolveCommunityId(msg.getGroupId()), houseId, userId, draftResult.getSenderId());
 
             // 处理图片
             java.util.List<String> fileList = new java.util.ArrayList<>();
@@ -532,6 +628,7 @@ public class AgentController {
                     .groupId(msg.getGroupId())
                     // 新增字段
                     .houseId(houseId)
+                    .userId(userId)
                     .fileList(fileList)
                     .appointmentStartTime(startTime)
                     .appointmentEndTime(endTime)
@@ -547,6 +644,40 @@ public class AgentController {
                     .errorCode("SERVICE_ERROR")
                     .errorMessage("调用下单服务异常：" + e.getMessage())
                     .build();
+        }
+    }
+
+    private String resolveCommunityId(String groupId) {
+        if (groupId == null || groupId.trim().isEmpty() ||
+                groupCommunityMapping == null || groupCommunityMapping.trim().isEmpty()) {
+            return null;
+        }
+        String[] items = groupCommunityMapping.split(",");
+        for (String item : items) {
+            if (item == null || item.trim().isEmpty()) {
+                continue;
+            }
+            String[] parts = item.split("=");
+            if (parts.length == 2) {
+                String gid = parts[0].trim();
+                String cid = parts[1].trim();
+                if (!gid.isEmpty() && gid.equals(groupId)) {
+                    return cid.isEmpty() ? null : cid;
+                }
+            }
+        }
+        return null;
+    }
+
+    private Long resolveUserIdByPhone(String ownerPhone) {
+        if (ownerPhone == null || ownerPhone.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            return cUserMapper.findUserIdByPhone(ownerPhone.trim());
+        } catch (Exception e) {
+            log.warn("根据手机号获取userId失败: phone={}", ownerPhone);
+            return null;
         }
     }
 }

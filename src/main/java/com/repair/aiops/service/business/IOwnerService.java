@@ -14,4 +14,7 @@ public interface IOwnerService extends IService<Owner> {
 
     // 绑定业主身份
     void bindOwner(String senderId, String roomNumber, String name);
+
+    // 绑定业主身份（含微信昵称）
+    void bindOwner(String senderId, String roomNumber, String name, String wechatName);
 }

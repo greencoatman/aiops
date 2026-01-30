@@ -90,4 +90,9 @@ public class OrderRequest {
      * 房屋ID
      */
     private Long houseId;
+
+    /**
+     * 业主用户ID（来自c_user）
+     */
+    private Long userId;
 }
